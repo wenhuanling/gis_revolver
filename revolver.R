@@ -5,35 +5,49 @@ library(maftools)
 library(parallel)
 library(evoverse.datasets)
 
-# the location of the loci file
+rm(list=ls())
+
+#### all the global parameters ####
+# the location of the loci.tsv files
 loci_location = "/mnt/projects/lailhh/workspace/Metastasis_Feb2020/S03_PyClone/output/output_20201001/S02_PyClone/random_1500mutations/pyclone_results/output"
-# the location of the maf 
+# the location of the MAF files
 maf_location = "/mnt/projects/zhaiww1/planet/data_storage/DNA_data/hg38/funcotator_results"
 
-# to load the masterfile for reading
-master_file = read_csv("/mnt/projects/zhaiww1/liver_cancer_data/shared_group_folder/masterfiles/hg38/LiverTCR_HG38_masterfile_DNA_Logisitic_current.csv")
-# the list of patient with normal tmb
-normal_tmb_patient_master_list = read_tsv("/mnt/projects/zhaiww1/liver_cancer_data/shared_group_folder/masterfiles/hg38/non-problematic-DNA-pat.list", col_names = F)
-# filter out all the normal tmb patients, simplifying the data frame
-master_file = master_file %>% filter(Unified_ID %in% normal_tmb_patient_master_list$X1) %>% select(Unified_ID, DNA_lib)
 # load the driver gene list
 driver_gene_list = scan("/mnt/projects/kayaan/computational_genomics/liver_integrative_analysis/Driver_conclusion/concensus_1349/withkoreanindels/concensus_1349_koreanindels.txt", "cha")
 
+# the list of patient with normal TMB
+normal_tmb_patient_master_list = read_tsv("/mnt/projects/zhaiww1/liver_cancer_data/shared_group_folder/masterfiles/hg38/non-problematic-DNA-pat.list", col_names = F)
+# non_normal_tmb = read_tsv("/mnt/projects/zhaiww1/planet/data_storage/DNA_data/hg38/work_folder/Scripts/masterfile/LiverTCR_HG38_master_file_tmb_200_samples.tsv")
+
+# to load the master file (current version) and all the normal tmb patients, 
+# simplifying the data frame to only the Unified ID and DNA libs for easy reference
+master_file = read_csv("/mnt/projects/zhaiww1/liver_cancer_data/shared_group_folder/masterfiles/hg38/LiverTCR_HG38_masterfile_DNA_Logisitic_current.csv") %>%
+  filter(Unified_ID %in% normal_tmb_patient_master_list$X1) %>% select(Unified_ID, DNA_lib)
+# master_file = read_csv("/mnt/projects/zhaiww1/liver_cancer_data/shared_group_folder/masterfiles/hg38/LiverTCR_HG38_masterfile_DNA_Logisitic_current.csv") %>% 
+#   filter(!DNA_lib %in% non_normal_tmb$DNA_lib) %>% select(Unified_ID, DNA_lib)
+
+##### loci.tsv files ####
 # find all the loci files in the location
 loci_list = data.frame(fn_dna=list.files(loci_location, pattern = "loci.tsv",recursive = T)) %>%
   separate(fn_dna, c("dna_lib", "tables", "loci"), sep = "/", remove = F)
-# combine and get the unified id according to the respective files
-pat_id = cbind(loci_list, master_file[match(loci_list$dna_lib, master_file$DNA_lib),1])
-pat_id = pat_id %>% select(Unified_ID)
+# combine and get the unified id according to the loci_list
+pat_id = cbind(loci_list, master_file[match(loci_list$dna_lib, master_file$DNA_lib),1]) %>% select(Unified_ID)
 
+##### Main section of code for generating the revolver input ####
+# create empty list 
 ccf_list = list()
-# to load all the ccf information/loci file into 1 list using function
+# to load all the ccf information/loci file into 1 list using function: revolver_input, using mclapply using 10 cores
 ccf_list = mclapply(pat_id$Unified_ID, revolver_input, mc.cores = 10)
-
+# combine the list into 1 single dataframe
 ccf_list = Reduce(rbind, ccf_list)
-write_tsv(ccf_list, "/mnt/projects/whling/cbp/Planet/revolver/input_for_revolver.tsv")
+# write_tsv(ccf_list, "/mnt/projects/whling/cbp/Planet/revolver/input_for_revolver_testing_09102020.tsv")
 
-my_cohort = revolver_cohort(revolver_input, CCF_parser = revolver::CCF_parser, ONLY.DRIVER = T, 
+##### the main revolver function ####
+# to create the revolver cohort
+# options: Only driver genes set to TRUE
+# min cluster size: set to 0
+my_cohort = revolver_cohort(ccf_list, CCF_parser = revolver::CCF_parser, ONLY.DRIVER = T, 
                             MIN.CLUSTER.SIZE = 0, annotation = "HG38 cohort")
 # to find out the duplicated driver genes and variantID
 my_cohort_dup_variant = revolver:::get_duplicates(my_cohort) %>% dplyr::select(variantID) %>% unique()
@@ -41,19 +55,30 @@ my_cohort_drivers_dups = Stats_drivers(my_cohort) %>% filter(N_tot == 1) %>% pul
 # to remove the duplicated driver events
 my_cohort_no_dup = revolver:::remove_drivers(my_cohort, my_cohort_drivers_dups) 
 # to remove duplicated variantID
-#my_cohort_no_dup = revolver:::remove_(my_cohort_no_dup, my_cohort_drivers_dups$variantID)
+my_cohort_no_dup = revolver:::remove_(my_cohort_no_dup, my_cohort_drivers_dups$variantID)
+
 #### to fit the revolver cohort for plotting of various plots ####
-# compute the number of mutation trees in the cohort
+# compute the number of mutation/clone trees in the cohort
+# currently the clone tree function seems to prompt error when running it
 my_cohort_mutation_tree = compute_mutation_trees(my_cohort)
-my_cohort_clone_tree = compute_clone_trees(my_cohort_no_dup) 
+# my_cohort_clone_tree = compute_clone_trees(my_cohort_no_dup) 
 # fit the cohort_mutation tree
 my_cohort_fit = revolver_fit(my_cohort_mutation_tree)
-# cluster the fitted cohort
+# find the cluster fit using the input from my_cohort_fit
 my_cohort_cluster = revolver_cluster(my_cohort_fit)
-# compute jackknife with cluster fit
+# compute jackknife fit with my_cohort_cluster
 my_cohort_jackknife = revolver_jackknife(my_cohort_cluster)
 
-# function to load all the ccf information into 1 dataframe
+
+#### generate and print out the figures ####
+# get the list of patient ID for the plotting
+pat_id_new = my_cohort_no_dup$patients
+# generate and print out the figures
+print_pdf(cohort = my_cohort_no_dup, phylo_tree = my_cohort_phylo_tree, pat_list = pat_id_new, 
+          location = "/mnt/projects/whling/cbp/Planet/revolver/hg38_revolver_plots.pdf", fit_tree = my_cohort_fit,
+          cluster = my_cohort_cluster, jackknife = my_cohort_jackknife)
+
+#### function to load all the ccf information into 1 dataframe ####
 revolver_input = function(pat_id){
   # filtered out only the input patient id
   master_file_filtered = master_file %>% filter(Unified_ID == pat_id)
@@ -96,7 +121,39 @@ revolver_input = function(pat_id){
   return(loci)
 }
 
-#revolver_input = read_tsv("/media/GIS-Aquila-Cluster/mnt/projects/whling/cbp/Planet/revolver/input_for_revolver.tsv")
-#revolver_input = revolver_input %>% mutate(cluster = as.character(cluster))
-# to form the revolver cohort for the analysis
+#### print pdf function ####
+print_pdf = function(cohort,phylo_tree, pat_list, location, fit_tree, cluster, jackknife) {
+  pdf(location, width = 16.53, height = 11.69 )
+  print(cohort)
+  overall = plot(cohort)
+  print(overall)
+  driver_onccurrence = plot_drivers_occurrence(fit_tree)
+  print(driver_onccurrence)
+  driver_graph = plot_drivers_graph(fit_tree)
+  print(driver_graph)
+  driver_clonality = plot_drivers_clonality(fit_tree)
+  print(driver_clonality)
+  penalty = plot_penalty(fit_tree)
+  print(penalty)
+  det_index = plot_DET_index(fit_tree)
+  print(det_index)
+  cluster_cohort = plot_clusters(cluster)
+  print(cluster_cohort)
+  dendrogram = plot_dendrogram(jackknife)
+  print(dendrogram)
+  jackknife_coclustering = plot_jackknife_coclustering(jackknife)
+  print(jackknife_coclustering)
+  jackknife_cluster = plot_jackknife_cluster_stability(jackknife)
+  print(jackknife_cluster)
+  jackknife_stable = plot_jackknife_trajectories_stability(jackknife)
+  print(jackknife_stable)
+  for (i in pat_list) {
+    print(i)
+    p_tree = plot_patient_trees(phylo_tree, i)
+    print(p_tree)
+    p_data = plot_patient_data(phylo_tree, i)
+    print(p_data)
+  }
+  dev.off()
+}
 
